@@ -1,14 +1,24 @@
 use chrono::{Duration as ChronoDur, Utc};
+use std::time::Instant;
+
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
 
 use crate::ground_control::core::TcpLink;
+use crate::ground_control::monitoring::GcsMonitor;
 use crate::ground_control::types::{InterlockState, ScheduledCommand};
 use crate::satellite::types::{CommandKind, CommandMsg, LinkMsg};
 
 pub async fn run_commands_22(mut link: TcpLink) -> Result<(), String> {
-    // Example schedule (kau boleh ubah ikut demo)
+    // schedule commands
     let mut queue: Vec<ScheduledCommand> = vec![
+        // SAFE cmd: selalu boleh jalan, buat bukti SAT receive command
+        ScheduledCommand {
+            id: 0,
+            kind: CommandKind::SetModeSafe,
+            dispatch_at: Utc::now() + ChronoDur::seconds(1),
+            deadline_ms: 2,
+        },
         ScheduledCommand {
             id: 1,
             kind: CommandKind::AntennaAlign,
@@ -24,57 +34,80 @@ pub async fn run_commands_22(mut link: TcpLink) -> Result<(), String> {
     ];
 
     let mut interlock = InterlockState::default();
+    let mut monitor = GcsMonitor::new();
+
+    // measure interlock latency (fault detect -> block)
+    let mut fault_detected_at: Option<Instant> = None;
+
+    // urgent dispatch timing (simple)
+    let mut tick = Instant::now();
 
     loop {
-        // =========================
-        // (1) RECEIVE inbound
-        // =========================
+        // 1) receive inbound from SAT
         while let Ok(msg) = link.rx.try_recv() {
             match msg {
                 LinkMsg::Fault(f) => {
-                    // ❗tak guna f.code (avoid error field merah)
+                    if !interlock.fault_active {
+                        fault_detected_at = Some(Instant::now());
+                    }
                     interlock.fault_active = true;
-                    warn!("(GCS) FAULT received: {:?}", f);
+                    interlock.last_fault = Some(f.code.clone()); // ✅ fix f.code merah
+                    warn!("(GCS) FAULT received: {:?} detail={}", f.code, f.detail);
                 }
+
                 LinkMsg::Telemetry(t) => {
-                    info!("(GCS) TELEMETRY received: {:?}", t);
+                    info!("(GCS) TELEMETRY seq={} sensor={:?} prio={}", t.seq, t.sensor, t.priority);
+
+                    let (req, loc_fault) = monitor.on_telemetry(&t);
+
+                    if let Some(req_msg) = req {
+                        let _ = link.tx.send(req_msg).await;
+                    }
+
+                    if let Some(loc) = loc_fault {
+                        warn!("(GCS) LOSS-OF-CONTACT triggered -> fault");
+                        let _ = link.tx.send(loc).await; // optional
+                    }
                 }
-                LinkMsg::Ack { msg, .. } => {
-                    info!("(GCS) ACK: {}", msg);
-                }
-                LinkMsg::Hello { who, .. } => {
-                    info!("(GCS) HELLO from {}", who);
-                }
+
                 _ => {}
             }
         }
 
-        // =========================
-        // (2) DISPATCH command due
-        // =========================
+        // 2) dispatch commands
         queue.sort_by_key(|c| c.dispatch_at);
+        let now = Utc::now();
 
         if let Some(cmd) = queue.first().cloned() {
-            let now = Utc::now();
             if cmd.dispatch_at <= now {
-                // Safety interlock: bila fault aktif, block unsafe cmds
                 let unsafe_cmd = matches!(cmd.kind, CommandKind::ResetSubsystem | CommandKind::AntennaAlign);
+
+                // interlock block
                 if interlock.fault_active && unsafe_cmd {
+                    if let Some(t0) = fault_detected_at.take() {
+                        let lat_ms = t0.elapsed().as_millis();
+                        warn!("(GCS) INTERLOCK latency={}ms (fault->block)", lat_ms);
+                        if lat_ms > 100 {
+                            warn!("(GCS) CRITICAL GROUND ALERT: fault response time >100ms");
+                        }
+                    }
+
                     warn!(
-                        "(GCS) COMMAND REJECTED id={} kind={:?} reason=INTERLOCK fault_active={}",
-                        cmd.id, cmd.kind, interlock.fault_active
+                        "(GCS) COMMAND REJECTED id={} kind={:?} reason=INTERLOCK fault_active=true",
+                        cmd.id, cmd.kind
                     );
                     queue.remove(0);
                     continue;
                 }
 
-                // urgent deadline check <=2ms (simple)
-                let late_ms = (now - cmd.dispatch_at).num_milliseconds();
+                // urgent dispatch deadline <=2ms (demo)
+                let late_ms = tick.elapsed().as_millis();
                 if cmd.deadline_ms <= 2 && late_ms > 2 {
                     warn!("(GCS) URGENT DISPATCH LATE id={} late_ms={}", cmd.id, late_ms);
                 }
+                tick = Instant::now();
 
-                let out = CommandMsg {
+                let msg = CommandMsg {
                     id: cmd.id,
                     kind: cmd.kind.clone(),
                     issued_at: now,
@@ -82,9 +115,9 @@ pub async fn run_commands_22(mut link: TcpLink) -> Result<(), String> {
                 };
 
                 link.tx
-                    .send(LinkMsg::Command(out))
+                    .send(LinkMsg::Command(msg))
                     .await
-                    .map_err(|_| "GCS send command failed".to_string())?;
+                    .map_err(|_| "send failed".to_string())?;
 
                 info!("(GCS) COMMAND DISPATCHED id={} kind={:?}", cmd.id, cmd.kind);
                 queue.remove(0);

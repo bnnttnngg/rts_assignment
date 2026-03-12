@@ -1,19 +1,29 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub enum SensorKind {
     Thermal,
     Attitude,
     Power,
 }
 
+impl SensorKind {
+    pub fn expected_period_ms(&self) -> u64 {
+        match self {
+            SensorKind::Thermal => 10,
+            SensorKind::Attitude => 20,
+            SensorKind::Power => 50,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelemetryPacket {
     pub seq: u64,
     pub sensor: SensorKind,
-    pub priority: u8,
-    pub generated_at: DateTime<Utc>,
+    pub priority: u8,                // 0 highest
+    pub generated_at: DateTime<Utc>, // sensor read time
     pub payload: String,
 }
 
@@ -22,7 +32,7 @@ pub enum CommandKind {
     SetModeSafe,
     ResetSubsystem,
     AntennaAlign,
-    RequestResend { from_seq: u64 },
+    RequestResend { from_seq: u64, sensor: SensorKind },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,9 +46,10 @@ pub struct CommandMsg {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FaultCode {
     ThermalMissedCycles,
-    DeadlineViolation,
+    DownlinkInitMissed,
     BufferOver80,
     LossOfContact,
+    RecoveryTooSlow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

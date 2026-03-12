@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+
 use crate::satellite::types::{CommandKind, FaultCode};
 
 #[derive(Debug, Clone)]
