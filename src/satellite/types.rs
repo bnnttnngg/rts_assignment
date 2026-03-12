@@ -22,8 +22,8 @@ impl SensorKind {
 pub struct TelemetryPacket {
     pub seq: u64,
     pub sensor: SensorKind,
-    pub priority: u8,                // 0 highest
-    pub generated_at: DateTime<Utc>, // sensor read time
+    pub priority: u8,
+    pub generated_at: DateTime<Utc>,
     pub payload: String,
 }
 
@@ -40,7 +40,7 @@ pub struct CommandMsg {
     pub id: u64,
     pub kind: CommandKind,
     pub issued_at: DateTime<Utc>,
-    pub deadline_ms: u64, // urgent <=2ms
+    pub deadline_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
