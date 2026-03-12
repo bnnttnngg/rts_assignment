@@ -6,7 +6,7 @@ use crate::satellite::types::{CommandKind, FaultCode};
 pub struct ScheduledCommand {
     pub id: u64,
     pub kind: CommandKind,
-    pub dispatch_at: DateTime<Utc>,
+    pub dispatch_at: chrono::DateTime<chrono::Utc>,
     pub deadline_ms: u64,
 }
 
