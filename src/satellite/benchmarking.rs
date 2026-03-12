@@ -6,6 +6,7 @@ use std::sync::{
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{info, warn};
 
+#[derive(Clone)]
 pub struct FaultFlags {
     pub delay: Arc<AtomicBool>,
     pub corrupt: Arc<AtomicBool>,
@@ -21,29 +22,34 @@ impl FaultFlags {
 }
 
 pub async fn run_fault_injector(flags: FaultFlags) {
-    let period = Duration::from_secs(60);
+    let secs = std::env::var("FAULT_PERIOD_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+
+    let period = Duration::from_secs(secs);
 
     loop {
         sleep(period).await;
 
-        info!("(SAT) FAULT INJECT START");
+        info!("(SAT) FAULT INJECT start (every {}s)", secs);
 
         flags.delay.store(true, Ordering::Relaxed);
         flags.corrupt.store(true, Ordering::Relaxed);
 
-        let start = Instant::now();
+        let t0 = Instant::now();
 
         sleep(Duration::from_millis(150)).await;
 
         flags.delay.store(false, Ordering::Relaxed);
         flags.corrupt.store(false, Ordering::Relaxed);
 
-        let recovery = start.elapsed();
+        let rec = t0.elapsed();
 
-        info!("(SAT) FAULT RECOVERED {:?}", recovery);
+        info!("(SAT) FAULT RECOVERED in {:?}", rec);
 
-        if recovery > Duration::from_millis(200) {
-            warn!("(SAT) RECOVERY TOO SLOW {:?}", recovery);
+        if rec > Duration::from_millis(200) {
+            warn!("(SAT) MISSION ABORT (recovery >200ms) {:?}", rec);
         }
     }
 }

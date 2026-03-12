@@ -1,61 +1,60 @@
-use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use crate::satellite::types::{FaultCode, FaultMsg, LinkMsg, TelemetryPacket};
+use crate::satellite::core::TcpLink;
+use crate::satellite::sensors::SharedBuffer;
+use crate::satellite::types::{FaultCode, FaultMsg, LinkMsg};
 
-pub async fn run_downlink(
-    mut rx: mpsc::Receiver<TelemetryPacket>,
-    gcs_tx: mpsc::Sender<LinkMsg>,
-) {
-    let mut queue: VecDeque<(TelemetryPacket, Instant)> = VecDeque::new();
-    let capacity = 100;
-
+pub async fn run_downlink(buffer: Arc<Mutex<SharedBuffer>>, mut link: TcpLink) {
     loop {
-        while let Ok(pkt) = rx.try_recv() {
-            if queue.len() >= capacity {
-                warn!("(SAT) DOWNLINK QUEUE FULL drop seq={}", pkt.seq);
-                continue;
-            }
+        sleep(Duration::from_secs(5)).await;
 
-            queue.push_back((pkt, Instant::now()));
-
-            let fill = (queue.len() as f64 / capacity as f64) * 100.0;
-
-            if fill > 80.0 {
-                warn!("(SAT) DEGRADED MODE queue_fill={:.1}%", fill);
-
-                let _ = gcs_tx.send(LinkMsg::Fault(FaultMsg {
-                    code: FaultCode::BufferOver80,
-                    detail: format!("queue fill {:.1}%", fill),
-                    at: Utc::now(),
-                })).await;
-            }
-        }
-
-        let window_start = Instant::now();
-
+        let win_open = Instant::now();
         info!("(SAT) VISIBILITY WINDOW OPEN");
 
-        if window_start.elapsed() > Duration::from_millis(5) {
-            warn!("(SAT) DOWNLINK INIT MISSED");
+        let init_start = Instant::now();
+        let init_ms = init_start.elapsed().as_millis();
+
+        if init_ms > 5 {
+            warn!("(SAT) DOWNLINK INIT MISSED init_ms={} (>5ms)", init_ms);
+
+            let _ = link
+                .tx
+                .send(LinkMsg::Fault(FaultMsg {
+                    code: FaultCode::DownlinkInitMissed,
+                    detail: format!("init_ms={}", init_ms),
+                    at: Utc::now(),
+                }))
+                .await;
         }
 
-        if let Some((pkt, enq)) = queue.pop_front() {
-            let latency = enq.elapsed();
+        let mut sent_any = false;
 
-            info!(
-                "(SAT) DOWNLINK SENT seq={} sensor={:?} latency={:?}",
-                pkt.seq, pkt.sensor, latency
-            );
+        while win_open.elapsed() <= Duration::from_millis(30) {
+            let pkt_opt = {
+                let mut b = buffer.lock().unwrap();
+                b.pop()
+            };
 
-            let _ = gcs_tx.send(LinkMsg::Telemetry(pkt)).await;
+            if let Some(pkt) = pkt_opt {
+                sent_any = true;
+
+                let _ = link.tx.send(LinkMsg::Telemetry(pkt)).await;
+
+                info!("(SAT) DOWNLINK SENT within 30ms");
+
+                break;
+            } else {
+                tokio::task::yield_now().await;
+            }
         }
 
-        sleep(Duration::from_secs(5)).await;
+        if !sent_any {
+            warn!("(SAT) DOWNLINK PREPARE MISSED (>30ms no data)");
+        }
     }
 }
