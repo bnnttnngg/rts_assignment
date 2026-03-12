@@ -1,12 +1,13 @@
 use clap::Parser;
 use tracing::{error, info};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 #[derive(Debug, Parser)]
 struct Args {
     #[arg(long)]
     role: String,
 
-    #[arg(long, default_value = "127.0.0.1:9000")]
+    #[arg(long, default_value = "0.0.0.0:9000")]
     bind: String,
 
     #[arg(long, default_value = "127.0.0.1:9000")]
@@ -14,10 +15,9 @@ struct Args {
 }
 
 fn init_log() {
-    // simple logger (no file) to avoid extra errors
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let layer = fmt::layer().with_timer(fmt::time::UtcTime::rfc_3339());
+    tracing_subscriber::registry().with(env).with(layer).init();
 }
 
 #[tokio::main]
@@ -27,8 +27,8 @@ async fn main() {
     info!("Starting role={}", args.role);
 
     let res = match args.role.to_lowercase().as_str() {
-        "gcs" => rts_assignment::ground_control::run_gcs(&args.bind).await,
-        "sat" => rts_assignment::satellite::run_sat(&args.connect).await,
+        "gcs" => rts_assignment::ground_control::start_ground_control(&args.bind).await,
+        "sat" => rts_assignment::satellite::start_satellite(&args.connect).await,
         _ => Err("role must be gcs or sat".into()),
     };
 
