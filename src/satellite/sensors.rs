@@ -17,19 +17,11 @@ pub struct SharedBuffer {
 
 impl SharedBuffer {
     pub fn new(cap: usize) -> Self {
-        Self {
-            cap,
-            q: VecDeque::with_capacity(cap),
-        }
+        Self { cap, q: VecDeque::with_capacity(cap) }
     }
 
-    pub fn len(&self) -> usize {
-        self.q.len()
-    }
-
-    pub fn cap(&self) -> usize {
-        self.cap
-    }
+    pub fn len(&self) -> usize { self.q.len() }
+    pub fn cap(&self) -> usize { self.cap }
 
     pub fn push_prioritized(&mut self, pkt: TelemetryPacket) -> Option<TelemetryPacket> {
         if self.q.len() < self.cap {
@@ -37,9 +29,7 @@ impl SharedBuffer {
             return None;
         }
 
-        let (worst_i, worst_p) = self
-            .q
-            .iter()
+        let (worst_i, worst_p) = self.q.iter()
             .enumerate()
             .map(|(i, p)| (i, p.priority))
             .max_by_key(|x| x.1)
@@ -72,32 +62,9 @@ fn next_seq(k: SensorKind) -> u64 {
 }
 
 pub fn spawn_sensors(buffer: Arc<Mutex<SharedBuffer>>, flags: FaultFlags) {
-    spawn_one(
-        buffer.clone(),
-        flags.clone(),
-        SensorKind::Thermal,
-        Duration::from_millis(10),
-        0,
-        true,
-    );
-
-    spawn_one(
-        buffer.clone(),
-        flags.clone(),
-        SensorKind::Attitude,
-        Duration::from_millis(20),
-        1,
-        false,
-    );
-
-    spawn_one(
-        buffer.clone(),
-        flags.clone(),
-        SensorKind::Power,
-        Duration::from_millis(50),
-        2,
-        false,
-    );
+    spawn_one(buffer.clone(), flags.clone(), SensorKind::Thermal,  Duration::from_millis(50), 0, true);
+    spawn_one(buffer.clone(), flags.clone(), SensorKind::Attitude, Duration::from_millis(100), 1, false);
+    spawn_one(buffer.clone(), flags.clone(), SensorKind::Power,    Duration::from_millis(200), 2, false);
 }
 
 fn spawn_one(
@@ -117,38 +84,37 @@ fn spawn_one(
 
         loop {
             itv.tick().await;
-
             let now = Instant::now();
+
             let actual = now.duration_since(last);
             last = now;
 
-            let jitter = if actual > period {
-                actual - period
-            } else {
-                period - actual
-            };
-
+            let jitter = if actual > period { actual - period } else { period - actual };
             if critical && jitter > Duration::from_millis(1) {
-                warn!("(SAT) JITTER VIOLATION sensor={:?} jitter={:?}", kind, jitter);
+                warn!("(SAT) JITTER VIOLATION sensor={:?} jitter={:?} (>1ms)", kind, jitter);
             }
 
             let read_t0 = Instant::now();
+            count += 1;
 
             if flags.delay.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
 
-            count += 1;
-
-            if kind == SensorKind::Attitude && count % 40 == 0 {
-                warn!("(SAT) SIMULATE DROP sensor={:?}", kind);
-                continue;
+            // simulate 3 consecutive missing attitude packets
+            if kind == SensorKind::Attitude {
+                let phase = count % 120;
+                if phase == 40 || phase == 41 || phase == 42 {
+                    let skipped_seq = next_seq(kind);
+                    warn!("(SAT) SIMULATE MISSING sensor={:?} seq={}", kind, skipped_seq);
+                    continue;
+                }
             }
 
             let payload = if flags.corrupt.load(Ordering::Relaxed) {
-                "CORRUPTED".to_string()
+                "CORRUPTED_PAYLOAD".to_string()
             } else {
-                format!("OK sensor={:?}", kind)
+                format!("sensor={:?} value=OK", kind)
             };
 
             let pkt = TelemetryPacket {
@@ -163,11 +129,9 @@ fn spawn_one(
 
             let dropped = {
                 let mut b = buffer.lock().unwrap();
-
                 let d = b.push_prioritized(pkt.clone());
 
                 let fill = (b.len() as f64 / b.cap() as f64) * 100.0;
-
                 if fill > 80.0 {
                     warn!("(SAT) BUFFER FILL {:.1}% (>80%)", fill);
                 }
@@ -175,17 +139,12 @@ fn spawn_one(
                 d
             };
 
-            if count % 25 == 0 {
+            if count % 20 == 0 {
                 info!("(SAT) SENSOR {:?} insert_latency={:?}", kind, insert_latency);
             }
 
             if let Some(d) = dropped {
-                warn!(
-                    "(SAT) BUFFER DROP sensor={:?} seq={} at={}",
-                    d.sensor,
-                    d.seq,
-                    Utc::now()
-                );
+                warn!("(SAT) BUFFER DROP sensor={:?} seq={} at={}", d.sensor, d.seq, Utc::now());
             }
         }
     });

@@ -2,7 +2,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{info, warn};
 
@@ -33,19 +32,16 @@ pub async fn run_fault_injector(flags: FaultFlags) {
         sleep(period).await;
 
         info!("(SAT) FAULT INJECT start (every {}s)", secs);
-
         flags.delay.store(true, Ordering::Relaxed);
         flags.corrupt.store(true, Ordering::Relaxed);
 
         let t0 = Instant::now();
-
         sleep(Duration::from_millis(150)).await;
 
         flags.delay.store(false, Ordering::Relaxed);
         flags.corrupt.store(false, Ordering::Relaxed);
 
         let rec = t0.elapsed();
-
         info!("(SAT) FAULT RECOVERED in {:?}", rec);
 
         if rec > Duration::from_millis(200) {

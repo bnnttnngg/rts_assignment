@@ -2,37 +2,41 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use crate::satellite::core::TcpLink;
 use crate::satellite::sensors::SharedBuffer;
 use crate::satellite::types::{FaultCode, FaultMsg, LinkMsg};
 
-pub async fn run_downlink(buffer: Arc<Mutex<SharedBuffer>>, mut link: TcpLink) {
+pub async fn run_downlink(buffer: Arc<Mutex<SharedBuffer>>, tx: mpsc::Sender<LinkMsg>) {
+    let mut window_count: u64 = 0;
+
     loop {
-        sleep(Duration::from_secs(5)).await;
+        // window every 100ms so telemetry stream stays realistic
+        sleep(Duration::from_millis(100)).await;
+        window_count += 1;
 
         let win_open = Instant::now();
         info!("(SAT) VISIBILITY WINDOW OPEN");
 
-        let init_start = Instant::now();
-        let init_ms = init_start.elapsed().as_millis();
-
-        if init_ms > 5 {
-            warn!("(SAT) DOWNLINK INIT MISSED init_ms={} (>5ms)", init_ms);
-
-            let _ = link
-                .tx
-                .send(LinkMsg::Fault(FaultMsg {
-                    code: FaultCode::DownlinkInitMissed,
-                    detail: format!("init_ms={}", init_ms),
-                    at: Utc::now(),
-                }))
-                .await;
+        // simulate missed init once in a while
+        if window_count % 20 == 0 {
+            tokio::time::sleep(Duration::from_millis(6)).await;
         }
 
-        let mut sent_any = false;
+        let init_ms = win_open.elapsed().as_millis();
+        if init_ms > 5 {
+            warn!("(SAT) DOWNLINK INIT MISSED init_ms={} (>5ms)", init_ms);
+            let _ = tx.send(LinkMsg::Fault(FaultMsg {
+                code: FaultCode::DownlinkInitMissed,
+                detail: format!("init_ms={}", init_ms),
+                at: Utc::now(),
+            })).await;
+        }
+
+        let mut sent = 0usize;
+        let mut first_send_done = false;
 
         while win_open.elapsed() <= Duration::from_millis(30) {
             let pkt_opt = {
@@ -40,21 +44,35 @@ pub async fn run_downlink(buffer: Arc<Mutex<SharedBuffer>>, mut link: TcpLink) {
                 b.pop()
             };
 
-            if let Some(pkt) = pkt_opt {
-                sent_any = true;
+            match pkt_opt {
+                Some(pkt) => {
+                    if !first_send_done {
+                        let prep_ms = win_open.elapsed().as_millis();
+                        if prep_ms > 30 {
+                            warn!("(SAT) DOWNLINK PREPARE MISSED prep_ms={} (>30ms)", prep_ms);
+                        } else {
+                            info!("(SAT) DOWNLINK PREPARED within {}ms", prep_ms);
+                        }
+                        first_send_done = true;
+                    }
 
-                let _ = link.tx.send(LinkMsg::Telemetry(pkt)).await;
+                    let queue_latency_ms = (Utc::now() - pkt.generated_at).num_milliseconds();
+                    let compressed_len = (pkt.payload.len() / 2).max(1);
 
-                info!("(SAT) DOWNLINK SENT within 30ms");
+                    info!(
+                        "(SAT) DOWNLINK packetized seq={} sensor={:?} queue_latency_ms={} compressed_len={}",
+                        pkt.seq, pkt.sensor, queue_latency_ms, compressed_len
+                    );
 
-                break;
-            } else {
-                tokio::task::yield_now().await;
+                    let _ = tx.send(LinkMsg::Telemetry(pkt)).await;
+                    sent += 1;
+                }
+                None => {
+                    tokio::task::yield_now().await;
+                }
             }
         }
 
-        if !sent_any {
-            warn!("(SAT) DOWNLINK PREPARE MISSED (>30ms no data)");
-        }
+        info!("(SAT) DOWNLINK WINDOW SENT {} packet(s)", sent);
     }
 }

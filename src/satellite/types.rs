@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SensorKind {
     Thermal,
     Attitude,
@@ -11,9 +11,9 @@ pub enum SensorKind {
 impl SensorKind {
     pub fn expected_period_ms(&self) -> u64 {
         match self {
-            SensorKind::Thermal => 10,
-            SensorKind::Attitude => 20,
-            SensorKind::Power => 50,
+            SensorKind::Thermal => 50,
+            SensorKind::Attitude => 100,
+            SensorKind::Power => 200,
         }
     }
 }
@@ -22,7 +22,7 @@ impl SensorKind {
 pub struct TelemetryPacket {
     pub seq: u64,
     pub sensor: SensorKind,
-    pub priority: u8,
+    pub priority: u8, // 0 = highest
     pub generated_at: DateTime<Utc>,
     pub payload: String,
 }
@@ -66,6 +66,7 @@ pub enum LinkMsg {
 
     Telemetry(TelemetryPacket),
     Command(CommandMsg),
+    CommandAck { id: u64, at: DateTime<Utc> },
     Fault(FaultMsg),
 
     Heartbeat { at: DateTime<Utc> },

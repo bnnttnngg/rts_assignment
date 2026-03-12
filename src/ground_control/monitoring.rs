@@ -8,14 +8,6 @@ use crate::satellite::types::{
     CommandKind, CommandMsg, FaultCode, FaultMsg, LinkMsg, SensorKind, TelemetryPacket,
 };
 
-fn expected_period_ms(sensor: SensorKind) -> u64 {
-    match sensor {
-        SensorKind::Thermal => 10,
-        SensorKind::Attitude => 20,
-        SensorKind::Power => 50,
-    }
-}
-
 pub struct GcsMonitor {
     next_seq: HashMap<SensorKind, u64>,
     miss_streak: HashMap<SensorKind, u32>,
@@ -38,15 +30,13 @@ impl GcsMonitor {
     }
 
     pub fn on_telemetry(&mut self, p: &TelemetryPacket) -> (Option<LinkMsg>, Option<LinkMsg>) {
-        // packet reception latency
         let lat_ms = (Utc::now() - p.generated_at).num_milliseconds();
         self.max_latency_ms = self.max_latency_ms.max(lat_ms);
 
-        // reception drift = |actual interval - expected interval|
         let now = Instant::now();
         if let Some(prev) = self.last_arrival.insert(p.sensor, now) {
             let actual = now.duration_since(prev);
-            let expected = Duration::from_millis(expected_period_ms(p.sensor));
+            let expected = Duration::from_millis(p.sensor.expected_period_ms());
             let drift = if actual > expected {
                 actual - expected
             } else {
@@ -62,12 +52,13 @@ impl GcsMonitor {
         let mut loss_of_contact: Option<LinkMsg> = None;
 
         if p.seq > expected_seq {
+            let missing_count = (p.seq - expected_seq) as u32;
             let streak = self.miss_streak.entry(p.sensor).or_insert(0);
-            *streak += 1;
+            *streak += missing_count;
 
             warn!(
-                "(GCS) MISSING sensor={:?} expected_seq={} got_seq={} miss_streak={}",
-                p.sensor, expected_seq, p.seq, *streak
+                "(GCS) MISSING sensor={:?} expected_seq={} got_seq={} missing_count={} miss_streak={}",
+                p.sensor, expected_seq, p.seq, missing_count, *streak
             );
 
             request_resend = Some(LinkMsg::Command(CommandMsg {
